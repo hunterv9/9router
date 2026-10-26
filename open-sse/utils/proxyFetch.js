@@ -10,6 +10,7 @@ import {
 } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 import { ensureClaudeCliVersion, applyClaudeCliVersion } from "./claudeCliVersion.js";
+import { isSocksProxyUrl, socksFetch } from "./socksTunnel.js";
 
 const CLAUDE_UA_PROBE = /claude-cli\/\d/;
 function hasClaudeCliHeader(headers) {
@@ -377,6 +378,13 @@ function isBodyReplaySafe(body) {
   return !(body && typeof body.getReader === "function" && body.locked);
 }
 
+function socksOptions(init, insecure) {
+  return {
+    servername: init?.servername,
+    rejectUnauthorized: !insecure,
+  };
+}
+
 async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = false) {
   try {
     // Protocol adapters may need Node's HTTP/1 transport on the direct path.
@@ -384,6 +392,10 @@ async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = f
     // also handles proxy egress directly rather than escaping to Node's OpenSSL agent.
     if (options.directFetch && (options.directFetchProxy || !proxyUrl)) {
       return await options.directFetch(url, options, { proxyUrl });
+    }
+    // undici's ProxyAgent only speaks http(s); a SOCKS URL needs its own path.
+    if (proxyUrl && isSocksProxyUrl(proxyUrl)) {
+      return await socksFetch(url, options, proxyUrl, socksOptions(options, false));
     }
     const dispatcher = await getDispatcher(proxyUrl, false, forceFreshSocket);
     return await rawFetch(url, { ...options, dispatcher });
@@ -395,6 +407,9 @@ async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = f
       }
       // ponytail: in-memory insecure agent fallback for self-signed MITM corporate/antivirus certs
       console.warn(`[ProxyFetch] TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${url}`);
+      if (proxyUrl && isSocksProxyUrl(proxyUrl)) {
+        return await socksFetch(url, options, proxyUrl, socksOptions(options, true));
+      }
       const insecureDispatcher = await getDispatcher(proxyUrl, true, forceFreshSocket);
       return await rawFetch(url, { ...options, dispatcher: insecureDispatcher });
     }

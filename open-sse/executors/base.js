@@ -84,6 +84,11 @@ export class BaseExecutor {
     return status === HTTP_STATUS.RATE_LIMITED && urlIndex + 1 < this.getFallbackCount();
   }
 
+  // Override in subclass for a provider-specific transport.
+  fetchUpstream(url, options, proxyOptions = null) {
+    return proxyAwareFetch(url, options, proxyOptions);
+  }
+
   // Override in subclass for provider-specific refresh
   async refreshCredentials(credentials, log, proxyOptions = null) {
     return null;
@@ -147,7 +152,7 @@ export class BaseExecutor {
         const effectiveProxyOptions = forceFreshSocketByUrl[urlIndex]
           ? { ...(proxyOptions || {}), forceFreshSocket: true }
           : proxyOptions;
-        const response = await proxyAwareFetch(url, {
+        const response = await this.fetchUpstream(url, {
           method: "POST",
           headers,
           body: bodyStr,

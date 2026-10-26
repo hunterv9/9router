@@ -36,7 +36,6 @@ const OPENCODE_CIPHER_LIST = [
 ].join(":");
 
 const DEFAULT_TIMEOUT_MS = 120000;
-const DIRECT_KEY = "";
 // A wreq-js session pins one proxy at creation ("Session proxy cannot be
 // changed after creation"), so the cache must be keyed by normalized proxy URL:
 // a proxy switch hands out a fresh session instead of silently reusing the old
@@ -57,6 +56,13 @@ export class OpencodeTlsUnavailableError extends Error {
   }
 }
 
+// A failed on-demand install fails the same way on the next call, so remember
+// it for a while instead of paying for it every request.
+const UNAVAILABLE_RECHECK_MS = 60 * 60 * 1000;
+let unavailableUntil = 0;
+
+// An empty proxy means direct. The native layer handles http(s) CONNECT and
+// SOCKS4/4a/5/5h itself.
 function normalizeProxyKey(proxyUrl) {
   const raw = typeof proxyUrl === "string" ? proxyUrl.trim() : "";
   if (!raw) return "";
@@ -86,6 +92,9 @@ async function buildSession(proxyUrl) {
   return Object.assign(session, { __proxyKey: normalizeProxyKey(proxyUrl) });
 }
 
+// Pooled mode (OPENCODE_TLS_FRESH=0): one session per egress, reused across
+// requests. A session fixes its proxy at creation, so the key is the proxy.
+// LRU-evicted so a large proxy pool cannot grow the map unbounded.
 function getSession(proxyUrl = "") {
   const key = normalizeProxyKey(proxyUrl);
   const cached = sessionsByProxy.get(key);
@@ -109,11 +118,40 @@ function getSession(proxyUrl = "") {
   return promise;
 }
 
+async function loadSession(proxyUrl = "") {
+  if (unavailableUntil > Date.now()) {
+    throw new OpencodeTlsUnavailableError("wreq-js install failed recently — retrying later");
+  }
+  return FRESH_TLS ? buildSession(proxyUrl) : getSession(proxyUrl);
+}
+
+/**
+ * True when the impersonating client can be built, i.e. wreq-js is installed.
+ * Fail-open: any load problem reports "not available".
+ */
+export async function isOpencodeTlsAvailable(proxyUrl = "") {
+  try {
+    await loadSession(proxyUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Drop the cached session(s) so the next call builds a fresh one. */
 export function resetOpencodeTlsSession() {
   const pending = [...sessionsByProxy.values()];
   sessionsByProxy.clear();
   for (const promise of pending) promise?.then?.((session) => session?.close?.()).catch(() => {});
+}
+
+/** Drop only this egress's cached session, so the next call rebuilds it. */
+function dropSession(proxyUrl = "") {
+  const key = normalizeProxyKey(proxyUrl);
+  const pending = sessionsByProxy.get(key);
+  if (!pending) return;
+  sessionsByProxy.delete(key);
+  pending.then((session) => session.close?.()).catch(() => { });
 }
 
 /**
@@ -131,8 +169,10 @@ export function resetOpencodeTlsSession() {
 export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, proxyUrl = "" } = {}) {
   let session;
   try {
-    session = FRESH_TLS ? await buildSession(proxyUrl) : await getSession(proxyUrl);
+    session = await loadSession(proxyUrl);
   } catch (error) {
+    if (error instanceof OpencodeTlsUnavailableError) throw error;
+    unavailableUntil = Date.now() + UNAVAILABLE_RECHECK_MS;
     throw new OpencodeTlsUnavailableError(
       `wreq-js unavailable (${error instanceof Error ? error.message : "unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`
     );
@@ -160,9 +200,19 @@ export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEF
   let res;
   try {
     res = await session.fetch(url, options);
-  } catch (err) {
+  } catch (error) {
+    // A transport failure is not "wreq-js is not installed", the only case the
+    // caller handles. Rethrown any other way it reaches BaseExecutor, which maps
+    // exceptions to a 502 — the user sees "Bad Gateway" with nothing pointing at
+    // the tunnel. Report it as unavailable so the native-fetch fallback runs.
+    //
+    // The session is dropped because one that failed this way usually keeps
+    // failing; the next call rebuilds it once the address recovers.
     if (FRESH_TLS) closeSession();
-    throw err;
+    else dropSession(proxyUrl);
+    throw new OpencodeTlsUnavailableError(
+      `wreq-js session failed (${error instanceof Error ? error.message : "unknown"}) — falling back to native fetch`
+    );
   }
 
   const headers = {};
