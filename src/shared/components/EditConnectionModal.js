@@ -347,7 +347,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           />
         )}
 
-        {!isCompatible && !isAzure && !isCloudflareAi && (
+        {!isCompatible && !isAzure && !isCloudflareAi && connection?.provider !== "opencode" && connection?.provider !== "opencode-zen" && (
           <div className="flex items-center gap-3">
             <Button onClick={handleTest} variant="secondary" disabled={testing}>
               {testing ? "Testing..." : "Test Connection"}

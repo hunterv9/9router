@@ -11,6 +11,60 @@ let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
 
+// Build the virtual anonymous connection for no-auth free providers
+// (e.g. OpenCode Free uses "Bearer public" when no key is set).
+// The id "noauth" is special-cased: markAccountUnavailable/clearAccountError
+// ignore it, so it can never lock, never write to DB, and never fallback-loop.
+async function buildNoAuthCredentials(providerId) {
+  const settings = await getSettings();
+  const override = (settings.providerStrategies || {})[providerId] || {};
+  const strategy = override.rotateStrategy || "none";
+  let pickedId = override.proxyPoolId || null;
+  // The free OpenCode lane is refused per egress, so it needs the rest of
+  // the pool as standbys.
+  const isOpencode = providerId === "opencode";
+  let allPools = [];
+  if (strategy !== "none") {
+    allPools = await getProxyPools({ isActive: true });
+    const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
+    pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+  } else if (isOpencode && pickedId && pickedId !== "__none__") {
+    allPools = await getProxyPools({ isActive: true });
+  }
+  const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
+
+  const connectionProxyAlternates = isOpencode
+    ? allPools
+        .filter(p => p.id !== resolvedProxy.proxyPoolId)
+        .map(proxyConfigFromPool)
+        .filter(Boolean)
+        .map(cfg => ({
+          proxyPoolId: cfg.proxyPoolId,
+          connectionProxyEnabled: cfg.connectionProxyEnabled,
+          connectionProxyUrl: cfg.connectionProxyUrl,
+          connectionNoProxy: cfg.connectionNoProxy,
+          vercelRelayUrl: cfg.vercelRelayUrl || "",
+          strictProxy: cfg.strictProxy === true,
+        }))
+    : [];
+
+  return {
+    id: "noauth",
+    connectionName: "Public",
+    isActive: true,
+    accessToken: "public",
+    providerSpecificData: {
+      connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+      connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+      connectionNoProxy: resolvedProxy.connectionNoProxy,
+      connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+      vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+      strictProxy: resolvedProxy.strictProxy === true,
+      ...(isOpencode ? { connectionProxyAlternates } : {}),
+    },
+  };
+}
+
 function githubMonthlyResetMs(status, errorText, provider) {
   if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
   if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
@@ -43,58 +97,27 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
     const providerId = resolveProviderId(provider);
 
-    // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
+    // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings).
+    // Only when no real connections exist: stored API-key accounts (e.g. 20 OpenCode keys)
+    // must win so per-account rotation can spread upstream quota load — a blanket
+    // short-circuit here made every request share the single anonymous quota pool.
     if (FREE_PROVIDERS[providerId]?.noAuth) {
-      const settings = await getSettings();
-      const override = (settings.providerStrategies || {})[providerId] || {};
-      const strategy = override.rotateStrategy || "none";
-      let pickedId = override.proxyPoolId || null;
-      // The free OpenCode lane is refused per egress, so it needs the rest of
-      // the pool as standbys.
-      const isOpencode = providerId === "opencode";
-      let allPools = [];
-      if (strategy !== "none") {
-        allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
-      } else if (isOpencode && pickedId && pickedId !== "__none__") {
-        allPools = await getProxyPools({ isActive: true });
+      // Only inject the anonymous Public connection when no real stored
+      // accounts exist: stored API-key accounts must win so per-account
+      // rotation can spread upstream quota load.
+      const noAuthConns = await getProviderConnections({ provider: providerId, isActive: true });
+      if (noAuthConns.length === 0) {
+        return buildNoAuthCredentials(providerId);
       }
-      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
-
-      const connectionProxyAlternates = isOpencode
-        ? allPools
-          .filter(p => p.id !== resolvedProxy.proxyPoolId)
-          .map(proxyConfigFromPool)
-          .filter(Boolean)
-          .map(cfg => ({
-            proxyPoolId: cfg.proxyPoolId,
-            connectionProxyEnabled: cfg.connectionProxyEnabled,
-            connectionProxyUrl: cfg.connectionProxyUrl,
-            connectionNoProxy: cfg.connectionNoProxy,
-            vercelRelayUrl: cfg.vercelRelayUrl || "",
-            strictProxy: cfg.strictProxy === true,
-          }))
-        : [];
-
-      return {
-        id: "noauth",
-        connectionName: "Public",
-        isActive: true,
-        accessToken: "public",
-        providerSpecificData: {
-          connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-          connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-          connectionNoProxy: resolvedProxy.connectionNoProxy,
-          connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-          vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-          strictProxy: resolvedProxy.strictProxy === true,
-          ...(isOpencode ? { connectionProxyAlternates } : {}),
-        },
-      };
     }
 
     const connections = await getProviderConnections({ provider: providerId, isActive: true });
+
+    // Fallback: free providers with optional API key but no stored connections
+    // still work anonymously (e.g. OpenCode Free uses "Bearer public" when no key is set)
+    if (connections.length === 0 && FREE_PROVIDERS[providerId]?.hasFree) {
+        return buildNoAuthCredentials(providerId);
+    }
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
@@ -139,6 +162,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      // Last-resort: no-auth free providers (e.g. OpenCode) fall back to the
+      // virtual anonymous "Public" connection when every stored key account is
+      // locked/excluded. Stored keys are still tried first, so the thin shared
+      // anonymous quota is only spent when nothing else can serve the request.
+      if (FREE_PROVIDERS[providerId]?.noAuth && !excludeSet.has("noauth")) {
+        log.warn("AUTH", `${provider} | all ${connections.length} key accounts unavailable for ${model || "any"} — last-resort anonymous Public`);
+        return buildNoAuthCredentials(providerId);
+      }
       // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);

@@ -1,4 +1,4 @@
-import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
+﻿import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
@@ -42,7 +42,7 @@ const OAUTH_TEST_CONFIG = {
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     extraHeaders: { "Content-Type": "application/json", "originator": "codex_cli_rs", "User-Agent": `codex_cli_rs/${CODEX_CLI_VERSION}` },
-    // Minimal invalid body — triggers fast 400 without consuming quota
+    // Minimal invalid body â€” triggers fast 400 without consuming quota
     body: JSON.stringify({ model: "gpt-5.3-codex", input: [], stream: false, store: false }),
     // 400 (bad request) means auth succeeded; only 401/403 means token is bad
     acceptStatuses: [400],
@@ -79,7 +79,7 @@ const OAUTH_TEST_CONFIG = {
   qoder: {
     // Test by hitting Qoder's userinfo endpoint with the device token.
     // refreshable: false because the device-flow refresh endpoint returns
-    // 403 for our flow (users re-login when expired). No checkExpiry —
+    // 403 for our flow (users re-login when expired). No checkExpiry â€”
     // we want the actual URL probe to run so revoked tokens surface.
     url: "https://openapi.qoder.sh/api/v1/userinfo",
     method: "GET",
@@ -106,7 +106,7 @@ const OAUTH_TEST_CONFIG = {
   },
   cline: { refreshable: true },
   gitlab: {
-    // Test by hitting the GitLab user API — requires api or read_user scope
+    // Test by hitting the GitLab user API â€” requires api or read_user scope
     url: "https://gitlab.com/api/v4/user",
     method: "GET",
     authHeader: "Authorization",
@@ -114,7 +114,7 @@ const OAUTH_TEST_CONFIG = {
   },
   "codebuddy-cn": { tokenExists: true },
   // codebuddy-intl uses the same JWT token structure as codebuddy-cn
-  // (access + refresh token pair, ~1-year expiry) — same test strategy (#4232).
+  // (access + refresh token pair, ~1-year expiry) â€” same test strategy (#4232).
   "codebuddy-intl": { tokenExists: true },
   kimchi: {
     url: KIMCHI_CONFIG.validationUrl || "https://api.cast.ai/v1/llm/openai/supported-providers",
@@ -127,7 +127,7 @@ const OAUTH_TEST_CONFIG = {
     },
     refreshable: false,
   },
-  // Grok CLI / Grok Build — probe /v1/user (no inference quota). Headers mirror official CLI.
+  // Grok CLI / Grok Build â€” probe /v1/user (no inference quota). Headers mirror official CLI.
   "grok-cli": {
     url: PROVIDERS["grok-cli"]?.userUrl || "https://cli-chat-proxy.grok.com/v1/user",
     method: "GET",
@@ -143,14 +143,14 @@ const OAUTH_TEST_CONFIG = {
       }),
     },
     refreshable: true,
-    // Subscription spending-limit is not an auth failure — token is fine, credits aren't.
+    // Subscription spending-limit is not an auth failure â€” token is fine, credits aren't.
     // Accept 402 so the connection stays "active" with a warning (same idea as Codex 400).
     acceptStatuses: [402],
     softFailMessage: {
       402: "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.",
     },
   },
-  // Muse Code subscription — probe /v1/models with the minted LLM|… key
+  // Muse Code subscription â€” probe /v1/models with the minted LLM|â€¦ key
   "muse": {
     url: "https://api.meta.ai/v1/models",
     method: "GET",
@@ -179,7 +179,7 @@ const OAUTH_TEST_CONFIG = {
 /**
  * Classify an OAuth probe response as success / soft-success / hard-fail.
  * Soft success (e.g. 402 spending-limit on Grok CLI) means auth works but the
- * account cannot spend — keep connection active and surface a warning.
+ * account cannot spend â€” keep connection active and surface a warning.
  * Exported for unit tests.
  */
 export function classifyOAuthProbeResult(res, config, bodyText = "") {
@@ -194,7 +194,7 @@ export function classifyOAuthProbeResult(res, config, bodyText = "") {
 
   // Soft success only when the provider configured an explicit message for this
   // status (e.g. Grok CLI 402 spending-limit). Codex-style acceptStatuses:[400]
-  // stays silent success — 400 there only proves auth, not a user-facing warning.
+  // stays silent success â€” 400 there only proves auth, not a user-facing warning.
   if (!res.ok && config?.acceptStatuses?.includes(status)) {
     const softMap = config.softFailMessage || {};
     if (softMap[status]) {
@@ -581,7 +581,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
   }
 
   // Web-cookie providers: a session probe (identity/lightweight endpoint) is the
-  // only meaningful test — the generic key probes have no way to read a cookie
+  // only meaningful test â€” the generic key probes have no way to read a cookie
   // header. An inconclusive probe keeps the connection active so a network
   // hiccup cannot mark a healthy session as broken.
   if (hasWebIdentityProbe(connection.provider)) {
@@ -871,11 +871,11 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         if (!res.ok) return { valid: false, error: "Invalid session cookie" };
         const data = await res.json().catch(() => null);
         const valid = !!(data && data.user);
-        return { valid, error: valid ? null : "Session expired — re-paste cookie" };
+        return { valid, error: valid ? null : "Session expired â€” re-paste cookie" };
       }
       case "opencode": {
         const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
-          headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.18.31" },
+          headers: { Authorization: "Bearer public", "User-Agent": "opencode/latest/2.0.29/cli" },
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "OpenCode free tier unavailable" };
       }
@@ -905,7 +905,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       }
       case "qoder":
       case "qoder-cn": {
-        // PAT (pt-...) exchange → job token. A successful exchange proves the PAT.
+        // PAT (pt-...) exchange â†’ job token. A successful exchange proves the PAT.
         const exchangeUrl = provider === "qoder-cn"
           ? "https://openapi.qoder.com.cn/api/v1/jobToken/exchange"
           : "https://openapi.qoder.sh/api/v1/jobToken/exchange";
@@ -955,7 +955,7 @@ case "llm7": {
         };
       }
       case "kimchi": {
-        // Dual-auth: same validation endpoint as the OAuth flow — the token (API key
+        // Dual-auth: same validation endpoint as the OAuth flow â€” the token (API key
         // or OAuth access token) is sent as Authorization: Bearer.
         const url = KIMCHI_CONFIG.validationUrl || "https://api.cast.ai/v1/llm/openai/supported-providers";
         const res = await fetchWithConnectionProxy(url, {

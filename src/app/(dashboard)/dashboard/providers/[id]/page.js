@@ -164,7 +164,7 @@ export default function ProviderDetailPage() {
       }
     : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId]);
   const authModes = providerInfo?.authModes || [];
-  const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
+  const isOAuth = !!OAUTH_PROVIDERS[providerId] || (authModes.length > 0 ? authModes.includes("oauth") : !!FREE_PROVIDERS[providerId]);
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
   const staticModels = getModelsByProviderId(providerId);
@@ -1547,10 +1547,11 @@ export default function ProviderDetailPage() {
         </Card>
       )}
 
-      {/* Connections */}
-      {isFreeNoAuth ? (
-        <NoAuthProxyCard providerId={providerId} />
-      ) : (
+      {/* NoAuth proxy config — always show for noAuth providers */}
+      {isFreeNoAuth && <NoAuthProxyCard providerId={providerId} />}
+
+      {/* Connections — show when not noAuth, or when noAuth but supports apikey (e.g. opencode) */}
+      {(!isFreeNoAuth || supportsApiKeyAuth) && (
         <Card>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="text-lg font-semibold">Connections</h2>
