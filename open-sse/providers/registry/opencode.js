@@ -12,6 +12,9 @@ export default {
   },
   category: "free",
   noAuth: true,
+  // Multi-account: keyed connections still work for paid models, so the
+  // dashboard must keep the Connections card (add key / edit proxy pool).
+  authModes: ["apikey"],
   transport: {
     baseUrl: "https://opencode.ai",
     headers: {
