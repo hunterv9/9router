@@ -164,11 +164,13 @@ export class BaseExecutor {
         if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) {
           // A 502 from an edge is typically a poisoned keep-alive socket — retry fresh.
           if (response.status === HTTP_STATUS.BAD_GATEWAY) forceFreshSocketByUrl[urlIndex] = true;
+          response.body?.cancel?.().catch(() => {});
           urlIndex--;
           continue;
         }
 
         if (this.shouldRetry(response.status, urlIndex)) {
+          response.body?.cancel?.().catch(() => {});
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
           lastStatus = response.status;
           continue;
