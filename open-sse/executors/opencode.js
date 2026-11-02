@@ -20,6 +20,16 @@ import {
 // the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
 const OPENCODE_UA = "opencode/latest/2.0.26/cli";
 const OPENCODE_CLIENT = "cli";
+// 40-hex project id generator: mirrors the real CLI which derives it
+// from the local workspace path, ensuring each conversation/session is
+// isolated and not grouped into a single bucket.
+export function generateProjectId() {
+  return crypto.randomBytes(20).toString("hex");
+}
+
+export function generateRequestId() {
+  return "req_" + crypto.randomBytes(12).toString("hex");
+}
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
 const SESSION_HEADER = "x-opencode-session";
