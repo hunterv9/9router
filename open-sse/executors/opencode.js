@@ -21,9 +21,12 @@ import {
 const OPENCODE_UA = "opencode/latest/2.0.26/cli";
 const OPENCODE_CLIENT = "cli";
 // 40-hex project id generator: mirrors the real CLI which derives it
-// from the local workspace path, ensuring each conversation/session is
-// isolated and not grouped into a single bucket.
-export function generateProjectId() {
+// from the local workspace path, ensuring requests within the same conversation
+// share a stable project identity while isolating different conversations.
+export function generateProjectId(session) {
+  if (session && typeof session === "string") {
+    return crypto.createHash("sha1").update(`project:${session}`).digest("hex");
+  }
   return crypto.randomBytes(20).toString("hex");
 }
 
@@ -537,16 +540,18 @@ export class OpenCodeExecutor extends BaseExecutor {
 
     // Mirrors the v2 CLI. Upstream needs x-opencode-session-id next to
     // x-opencode-session, and rejects any x-opencode-request (v1 only) with 403.
+    const projectHeader = lower["x-opencode-project"];
+    const validProject = typeof projectHeader === "string" && /^[0-9a-f]{40}$/i.test(projectHeader);
     const headers = {
       "Content-Type": "application/json",
       "Authorization": "Bearer public",
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || OPENCODE_CLIENT,
+      "x-opencode-project": validProject ? projectHeader.toLowerCase() : generateProjectId(session),
       "x-opencode-session": session,
       "x-opencode-session-id": session,
       "x-session-affinity": session,
       "x-session-id": session,
-      "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",
     };
     if (url.endsWith("/messages")) headers["anthropic-version"] = ANTHROPIC_API_VERSION;
