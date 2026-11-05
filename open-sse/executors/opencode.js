@@ -33,9 +33,10 @@ import {
   coerceResponsesOutput,
 } from "../translator/formats/responsesApi.js";
 
-// OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. Upstream rejects
-// the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
-const OPENCODE_UA = "opencode/latest/2.0.26/cli";
+// Wire shape observed on a working free-lane call (OpenCode server log, 2026-11-05):
+// UA "opencode/<cli> ai-sdk/... runtime/bun/..." with x-opencode-client "cli".
+// The older "opencode/dev/.../opencode" CLI shape is rejected with 429.
+const OPENCODE_UA = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 const OPENCODE_CLIENT = "cli";
 const BOOT_PROJECT_ID = crypto.randomBytes(20).toString("hex");
 // 40-hex project id generator: mirrors the real CLI which derives it
@@ -50,7 +51,7 @@ export function generateProjectId(credentials) {
 }
 
 export function generateRequestId() {
-  return "req_" + crypto.randomBytes(12).toString("hex");
+  return "msg_" + crypto.randomBytes(18).toString("base64url").replace(/[^0-9A-Za-z]/g, "A").slice(0, 24);
 }
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
@@ -818,14 +819,17 @@ export class OpenCodeExecutor extends BaseExecutor {
       if (!(error instanceof OpencodeTlsUnavailableError)) throw error;
       // Keep the request alive without the impersonated handshake.
       return markTransport(await proxyAwareFetch(url, options, proxyOptions), "native");
+    }
+  }
 
-  // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now
-  // answers every free request with 403 FreeTierError.
+  // Free tier now serves per-protocol bases (OpenCode /inference model metadata):
+  // openai -> /inference/openai/v1, anthropic -> /inference/anthropic/v1.
+  // The older flat /inference/v1 path is rejected with 429.
   buildUrl(model) {
     const base = this.config.baseUrl;
-    if (isResponsesModel(model)) return `${base}/inference/v1/responses`;
-    if (isMessagesModel(model)) return `${base}/inference/v1/messages`;
-    return `${base}/inference/v1/chat/completions`;
+    if (isResponsesModel(model)) return `${base}/inference/openai/v1/responses`;
+    if (isMessagesModel(model)) return `${base}/inference/anthropic/v1/messages`;
+    return `${base}/inference/openai/v1/chat/completions`;
   }
 
   buildHeaders(credentials, stream = true, url = "") {
@@ -838,17 +842,18 @@ export class OpenCodeExecutor extends BaseExecutor {
 
     const session = credentials?.[SESSION_FIELD] || this.prepareRequestCredentials({ credentials })[SESSION_FIELD];
 
-    // Mirrors the v2 CLI. Upstream needs x-opencode-session-id next to
-    // x-opencode-session, and rejects any x-opencode-request (v1 only) with 403.
+    // Mirrors the real v2 CLI wire shape: session id is sent on all four headers
+    // (session, session-id, session-affinity, X-Session-Id), x-opencode-request-id
+    // is freshly generated per request, and project id has stable 40-hex workspace identity.
     const projectHeader = lower["x-opencode-project"];
     const validProject = typeof projectHeader === "string" && /^[0-9a-f]{40}$/i.test(projectHeader);
-    // Project id has a stable 40-hex workspace identity.
     const headers = {
       "Content-Type": "application/json",
       "Authorization": "Bearer public",
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || OPENCODE_CLIENT,
       "x-opencode-project": validProject ? projectHeader.toLowerCase() : generateProjectId(credentials),
+      "x-opencode-request-id": generateRequestId(),
       "x-opencode-session": session,
       "x-opencode-session-id": session,
       "x-session-affinity": session,
