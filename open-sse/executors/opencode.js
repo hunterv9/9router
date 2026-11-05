@@ -847,9 +847,12 @@ export class OpenCodeExecutor extends BaseExecutor {
     // is freshly generated per request, and project id has stable 40-hex workspace identity.
     const projectHeader = lower["x-opencode-project"];
     const validProject = typeof projectHeader === "string" && /^[0-9a-f]{40}$/i.test(projectHeader);
+    // Keyed connections must carry their own credential; only the anonymous
+    // "Public" noauth stub falls back to the shared "public" bearer.
+    const bearer = credentials?.apiKey || credentials?.accessToken || "public";
     const headers = {
       "Content-Type": "application/json",
-      "Authorization": "Bearer public",
+      "Authorization": `Bearer ${bearer}`,
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || OPENCODE_CLIENT,
       "x-opencode-project": validProject ? projectHeader.toLowerCase() : generateProjectId(credentials),
