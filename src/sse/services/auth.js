@@ -260,6 +260,27 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
+    // The free OpenCode lane is refused per egress (IP), so a keyed connection
+    // also needs the other pools as standbys: on a 429 the executor cools the
+    // current egress and retries once on an alternate. Only real proxies qualify
+    // — relay pools travel on the native path, which the lane's TLS gate rejects.
+    let connectionProxyAlternates = [];
+    if (providerId === "opencode") {
+      const pools = await getProxyPools({ isActive: true });
+      connectionProxyAlternates = pools
+        .filter(p => p.id !== resolvedProxy.proxyPoolId)
+        .map(proxyConfigFromPool)
+        .filter(cfg => cfg && cfg.connectionProxyEnabled)
+        .map(cfg => ({
+          proxyPoolId: cfg.proxyPoolId,
+          connectionProxyEnabled: true,
+          connectionProxyUrl: cfg.connectionProxyUrl,
+          connectionNoProxy: cfg.connectionNoProxy,
+          vercelRelayUrl: "",
+          strictProxy: cfg.strictProxy === true,
+        }));
+    }
+
     return {
       authType: connection.authType,
       apiKey: connection.apiKey,
@@ -280,6 +301,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
         strictProxy: resolvedProxy.strictProxy === true,
+        ...(connectionProxyAlternates.length ? { connectionProxyAlternates } : {}),
       },
       connectionId: connection.id,
       // Include current status for optimization check
@@ -305,6 +327,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+
+  // The OpenCode free lane refuses every key with the same lane-wide
+  // "FreeUsageLimitError", so the refusal is not about THIS account. Walking the
+  // remaining keys turns one 429 into N, locks every account for a limit none of
+  // them caused (they expire seconds later) and floods the log with a lock +
+  // fallback line per key. Surface the single 429 and leave the accounts alone.
+  if (Number(status) === 429 && /FreeUsageLimitError/i.test(String(errorText || ""))) {
+    log.debug("AUTH", `${resolveProviderId(provider) || provider || "provider"} | free-lane limit shared across keys — no account lock, no fallback`);
+    return { shouldFallback: false, cooldownMs: 0 };
+  }
+
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
