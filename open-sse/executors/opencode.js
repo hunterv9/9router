@@ -7,25 +7,16 @@ import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
-import { opencodeTlsFetch, OpencodeTlsUnavailableError } from "../services/opencodeTlsClient.js";
-import { isOpencodeTransportEnabled, opencodeTransportFetch, OpencodeTransportUnavailableError } from "../utils/opencodeTransport.js";
-import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { opencodeTransportFetch } from "../utils/opencodeTransport.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   DIRECT_EGRESS_ID,
-  clearEgressCooldown,
   describeEgress,
-  getEgressCooldown,
-  hasActiveDirectCooldown,
   hasAlternateEgresses,
-  isEgressProbeDue,
-  markEgressCooling,
-  parseRetryAfterMs,
   resolveEgress,
   selectAlternateProxy,
-  syntheticRateLimitResponse,
 } from "../utils/egress.js";
-import { normalizeString, resolveEffectiveProxyUrl } from "../utils/proxyResolution.js";
+import { resolveEffectiveProxyUrl } from "../utils/proxyResolution.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -651,32 +642,9 @@ export class OpenCodeExecutor extends BaseExecutor {
       egress = { id: DIRECT_EGRESS_ID, kind: "direct", confirmed: false, ip: null, proxyUrl: null, relayUrl: null };
     }
 
-    const cooldown = getEgressCooldown(egress);
-    if (cooldown && egress.confirmed) {
-      const selection = selectAlternateProxy(proxyOptions, targetUrl, new Set([egress.id]));
-      if (selection.alternate) {
-        log?.debug?.(
-          "EGRESS",
-          `${describeEgress(egress)} cooling ${Math.ceil(cooldown.retryAfterMs / 1000)}s → ${describeEgress(selection.alternate.egress)}`
-        );
-        proxyOptions = selection.alternate.proxyOptions;
-        egress = selection.alternate.egress;
-      } else if (isEgressProbeDue(egress)) {
-        // Nothing else to try, so verify the refusal instead of trusting it:
-        // one real request now beats hours of answering 429 from cache.
-        log?.debug?.("EGRESS", `${describeEgress(egress)} cooling ${Math.ceil(cooldown.retryAfterMs / 1000)}s — probing`);
-      } else {
-        const retryAfterMs = Math.min(cooldown.retryAfterMs, selection.earliestCooldownMs ?? Infinity);
-        log?.warn?.("EGRESS", `${describeEgress(egress)} cooling ${Math.ceil(cooldown.retryAfterMs / 1000)}s; no alternate — local 429`);
-        return {
-          response: syntheticRateLimitResponse(retryAfterMs),
-          url: targetUrl,
-          headers: {},
-          transformedBody: args.body,
-        };
-      }
-    }
-
+    // Egress poisoning disabled: never block requests by cached cooldowns, never
+    // cool on 429. Upstream quota/limit 429s must surface as-is; no synthetic
+    // "local 429" fast-fails.
     const prepared = this.prepareRequestCredentials({ ...args, egressId: egress.id });
     const retryBody = hasAlternateEgresses(proxyOptions) ? cloneRequestBody(args.body) : null;
 
@@ -686,8 +654,6 @@ export class OpenCodeExecutor extends BaseExecutor {
       proxyOptions: options,
       credentials,
     });
-
-    const egressId = egress.id;
 
     const overloadSleep = (ms) => sleep(ms + Math.random() * 250, signal);
 
@@ -719,58 +685,16 @@ export class OpenCodeExecutor extends BaseExecutor {
         }
       }
 
-      if (result.response.status !== 429) {
-        // Any non-429 answer proves the egress is healthy again.
-        clearEgressCooldown(egressId);
-        return result;
-      }
+      if (result.response.status !== 429) return result;
 
-      const bodyText = await readResponseText(result.response);
-      const retryAfterMs = parseRetryAfterMs(result.response.headers, bodyText);
       const rotated = rotateSession(prepared, egress.id);
-
-      // A refusal that came back over Node's handshake is the TLS gate talking,
-      // not the egress: the same IP answers 200 through the Bun sidecar right
-      // after. Cooling it here (and hopping to another IP on the same broken
-      // transport) is what strands the provider for 30 minutes.
-      if (transportOf(result.response) !== "bun") {
-        log?.warn?.(
-          "EGRESS",
-          `429 over ${transportOf(result.response)} transport — TLS gate, not the egress; no cooling or retry`
-        );
-        return result;
-      }
-
-      if (egress.kind === "direct" && !egress.confirmed) {
-        try {
-          const probed = await resolveEgress({ targetUrl, proxyOptions, forceProbe: true, fresh: true });
-          if (probed.confirmed) egress = probed;
-        } catch (error) {
-          log?.debug?.("EGRESS", `direct probe failed, fail-open: ${error.message}`);
-        }
-      }
-
       const selection = selectAlternateProxy(proxyOptions, targetUrl, new Set([egress.id]));
       const retrySameEgress = rotated && egress.kind === "direct";
 
-      if (!selection.alternate) {
-        const cooling = markEgressCooling(egress, retryAfterMs);
-        if (cooling) {
-          log?.warn?.(
-            "EGRESS",
-            `${describeEgress(egress)} cooling ${Math.ceil(cooling.retryAfterMs / 1000)}s (429, retry-after ${result.response.headers?.get?.("retry-after") ?? "none"})`
-          );
-        }
-        if (!retrySameEgress) return result;
-      } else {
-        const cooling = markEgressCooling(egress, retryAfterMs);
-        if (cooling) {
-          log?.warn?.(
-            "EGRESS",
-            `${describeEgress(egress)} cooling ${Math.ceil(cooling.retryAfterMs / 1000)}s (429, retry-after ${result.response.headers?.get?.("retry-after") ?? "none"})`
-          );
-        }
-      }
+      // No egress cooling/poisoning. Try one alternate (if any) to rotate proxy/IP,
+      // or retry once on the same direct egress with a fresh session; otherwise
+      // return the upstream 429 as-is.
+      if (!selection.alternate && !retrySameEgress) return result;
 
       const retryEgress = selection.alternate?.egress || egress;
       const retryProxyOptions = selection.alternate?.proxyOptions ?? proxyOptions;
@@ -783,54 +707,21 @@ export class OpenCodeExecutor extends BaseExecutor {
       log?.warn?.("EGRESS", `429 on ${describeEgress(egress)} → retry once on ${describeEgress(retryEgress)}`);
 
       const retryResult = await run(retryCredentials, retryProxyOptions, retryBody || args.body);
-      if (!retryResult?.response) return retryResult;
-      if (retryResult.response.status === 429 && transportOf(retryResult.response) === "bun") {
-        const retryText = await readResponseText(retryResult.response);
-        markEgressCooling(retryEgress, parseRetryAfterMs(retryResult.response.headers, retryText));
-      } else {
-        clearEgressCooldown(retryEgress.id);
-      }
-      return retryResult;
+      return retryResult || result;
     }
   }
 
-  // The free gate keys on the TLS ClientHello. Preferred transport is the Bun
-  // sidecar — a real Bun handshake, which the gate accepts where Node's OpenSSL
-  // is refused; wreq-js can match a cipher list but not the rest of the
-  // ClientHello. Both impersonating clients carry the proxy hop themselves and
-  // speak http(s) CONNECT and SOCKS natively; a relay rewrites headers, so it
-  // stays on the shared native path.
+  // The free gate keys on the TLS ClientHello. OpenCode free-lane requests MUST
+  // go through the Bun sidecar (real Bun/BoringSSL handshake) — Node/wreq/native
+  // TLS is rejected by the gate, so we never fall back to tls/wreq/native.
   async fetchUpstream(url, options, proxyOptions = null) {
-    if (normalizeString(proxyOptions?.vercelRelayUrl)) {
-      return markTransport(await proxyAwareFetch(url, options, proxyOptions), "native");
-    }
     const { url: proxyUrl } = resolveEffectiveProxyUrl(url, proxyOptions);
-
-    if (isOpencodeTransportEnabled()) {
-      try {
-        return markTransport(await opencodeTransportFetch(url, {
-          method: options.method,
-          headers: options.headers,
-          body: options.body,
-          signal: options.signal,
-        }, { proxyUrl: proxyUrl || "" }), "bun");
-      } catch (error) {
-        if (!(error instanceof OpencodeTransportUnavailableError)) throw error;
-        // Bun runtime missing or the sidecar failed — fall through below.
-      }
-    }
-
-    try {
-      return markTransport(await opencodeTlsFetch(url, {
-        method: options.method,
-        headers: options.headers,
-        body: options.body,
-      }, { signal: options.signal, proxyUrl: proxyUrl || "" }), "tls");
-    } catch (error) {
-      if (!(error instanceof OpencodeTlsUnavailableError)) throw error;
-      // Keep the request alive without the impersonated handshake.
-      return markTransport(await proxyAwareFetch(url, options, proxyOptions), "native");
-    }
+    return markTransport(await opencodeTransportFetch(url, {
+      method: options.method,
+      headers: options.headers,
+      body: options.body,
+      signal: options.signal,
+    }, { proxyUrl: proxyUrl || "" }), "bun");
   }
 
   // Free tier now serves per-protocol bases (OpenCode /inference model metadata):

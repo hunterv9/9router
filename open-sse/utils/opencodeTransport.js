@@ -38,8 +38,8 @@ const store = g.__ninrouterOpencodeTransport
 if (!store.children) store.children = new Set();
 
 export function isOpencodeTransportEnabled() {
-  const v = String(process.env.OPENCODE_TRANSPORT || "").trim().toLowerCase();
-  return !(v === "off" || v === "false" || v === "0" || v === "disabled" || v === "no");
+  // OpenCode free-lane requires Bun TLS fingerprint; always enabled.
+  return true;
 }
 
 function findOnPath(name) {
