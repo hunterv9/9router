@@ -680,22 +680,14 @@ export class OpenCodeExecutor extends BaseExecutor {
     const prepared = this.prepareRequestCredentials({ ...args, egressId: egress.id });
     const retryBody = hasAlternateEgresses(proxyOptions) ? cloneRequestBody(args.body) : null;
 
-    const run = (credentials, options, body, bodyFn = null) => super.execute({
+    const run = (credentials, options, body) => super.execute({
       ...args,
       body,
-      credentials,
       proxyOptions: options,
-      ...(bodyFn ? { directFetch: bodyFn } : {}),
+      credentials,
     });
 
     const egressId = egress.id;
-    const directFetch = (url, options, proxyUrl) => opencodeTlsFetch(url, {
-      method: options.method,
-      headers: options.headers,
-      body: options.body,
-    }, { signal: options.signal, proxyUrl });
-    // wreq-js tunnels the proxy itself; adapters that cannot must stay on undici.
-    directFetch.proxyCapable = true;
 
     const overloadSleep = (ms) => sleep(ms + Math.random() * 250, signal);
 
@@ -705,7 +697,7 @@ export class OpenCodeExecutor extends BaseExecutor {
     // inspects a clone of the body so a terminal response reaches the caller
     // intact; a disconnected client aborts out of the backoff.
     for (let attempt = 1; ; attempt++) {
-      const result = await run(prepared, proxyOptions, args.body, directFetch);
+      const result = await run(prepared, proxyOptions, args.body);
       if (!result?.response) return result;
       const rejection = await classifyRejection(result.response);
 
@@ -790,7 +782,7 @@ export class OpenCodeExecutor extends BaseExecutor {
 
       log?.warn?.("EGRESS", `429 on ${describeEgress(egress)} → retry once on ${describeEgress(retryEgress)}`);
 
-      const retryResult = await run(retryCredentials, retryProxyOptions, retryBody || args.body, directFetch);
+      const retryResult = await run(retryCredentials, retryProxyOptions, retryBody || args.body);
       if (!retryResult?.response) return retryResult;
       if (retryResult.response.status === 429 && transportOf(retryResult.response) === "bun") {
         const retryText = await readResponseText(retryResult.response);
