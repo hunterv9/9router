@@ -8,7 +8,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
 import { opencodeTlsFetch, OpencodeTlsUnavailableError } from "../services/opencodeTlsClient.js";
-import { isOpencodeTransportEnabled, opencodeTransportFetch, OpencodeTransportUnavailableError, markTransport, transportOf } from "../utils/opencodeTransport.js";
+import { isOpencodeTransportEnabled, opencodeTransportFetch, OpencodeTransportUnavailableError } from "../utils/opencodeTransport.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
@@ -60,6 +60,25 @@ const SESSION_FIELD = "_opencodeSession";
 export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const SYNTHETIC_SESSION_SEED_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\d{13}$/i;
+
+// Tags the transport that actually produced the response so the 429 handler can
+// tell a TLS-gate refusal (Node/wreq-js, same IP later answers 200 through Bun)
+// from a real Bun-side rate limit. Without this a gate 429 poisons the egress
+// for 30 minutes even though the sidecar can reach the lane.
+const TRANSPORT_MARK = Symbol.for("9router.opencode.transport");
+function markTransport(response, transport) {
+  if (response && typeof response === "object") {
+    try {
+      Object.defineProperty(response, TRANSPORT_MARK, { value: transport, configurable: true });
+    } catch {
+      /* frozen response: treat as unknown */
+    }
+  }
+  return response;
+}
+function transportOf(response) {
+  return (response && response[TRANSPORT_MARK]) || "unknown";
+}
 
 // Free-lane load shedding: total attempts (first try + retries) and backoff.
 // Live bursts last ~20 s (a request that kept failing for 8 s succeeded at 19 s),

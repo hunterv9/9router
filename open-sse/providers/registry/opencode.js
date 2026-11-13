@@ -21,6 +21,9 @@ export default {
       "x-opencode-client": "desktop",
     },
     forceStream: true,
+    // The free lane is only reachable through flaky WARP proxies; a dead peer
+    // otherwise burns the whole 60s default waiting for response headers.
+    timeoutMs: 12000,
     noAuth: true,
     // Zen reasoning models reject multi-turn history whose assistant messages
     // carry no reasoning_content (400 missing_required_parameter), and the

@@ -33,6 +33,9 @@ export class OpencodeTransportUnavailableError extends Error {
 const g = globalThis;
 const store = g.__ninrouterOpencodeTransport
   || (g.__ninrouterOpencodeTransport = { state: null, starting: null, unavailableUntil: 0, lastError: "" });
+// Every child this module ever spawned, so a failed forward can retire the one it
+// used without leaking the process (each orphan keeps ~27MB and a Bun event loop).
+if (!store.children) store.children = new Set();
 
 export function isOpencodeTransportEnabled() {
   const v = String(process.env.OPENCODE_TRANSPORT || "").trim().toLowerCase();
@@ -116,6 +119,9 @@ function ensureStarted() {
       },
     });
 
+    store.children.add(child);
+    child.on("close", () => store.children.delete(child));
+
     const fail = (message) => {
       if (settled) return;
       settled = true;
@@ -124,6 +130,7 @@ function ensureStarted() {
       store.lastError = message;
       store.unavailableUntil = Date.now() + UNAVAILABLE_RECHECK_MS;
       try { child.kill(); } catch { /* already gone */ }
+      store.children.delete(child);
       reject(new OpencodeTransportUnavailableError(message));
     };
 
@@ -157,11 +164,12 @@ function ensureStarted() {
   return store.starting;
 }
 
-/** Stop the sidecar; the next request starts a fresh one. */
+/** Stop the sidecar(s); the next request starts a fresh one. */
 export function stopOpencodeTransport() {
-  if (store.state?.child) {
-    try { store.state.child.kill(); } catch { /* already gone */ }
+  for (const child of store.children) {
+    try { child.kill(); } catch { /* already gone */ }
   }
+  store.children.clear();
   store.state = null;
 }
 
@@ -198,9 +206,14 @@ export async function opencodeTransportFetch(url, init = {}, { proxyUrl = "" } =
     });
   } catch (error) {
     // The port may still be listening while the sidecar is wedged, or the child
-    // may have died without the exit handler firing yet. Drop the state so the
-    // next request spawns a fresh sidecar instead of reusing a dead one.
-    if (store.state === state) store.state = null;
+    // may have died without the exit handler firing yet. Retire the child (do not
+    // just drop the state — that orphaned the process) and let the next request
+    // spawn a fresh sidecar instead of reusing a dead one.
+    if (store.state === state) {
+      try { state.child?.kill(); } catch { /* already gone */ }
+      store.children.delete(state.child);
+      store.state = null;
+    }
     throw new OpencodeTransportUnavailableError(`sidecar forward failed: ${error?.message || error}`);
   }
 

@@ -9,6 +9,24 @@
 // separate Bun install is required. Prints one JSON line {"port":N} when ready.
 
 const TOKEN = process.env.OPENCODE_TRANSPORT_TOKEN || "";
+// Abort a request that never produces response headers (a dead WARP proxy sits
+// in connect until someone cancels). Only the header wait is bounded: once the
+// stream is open the client's own signal governs it.
+const CONNECT_TIMEOUT_MS = Number(process.env.OPENCODE_TRANSPORT_CONNECT_TIMEOUT_MS) || 25_000;
+
+// One signal that follows the downstream request and gains a connect deadline.
+// The listener stays attached after the deadline is cleared so a client that
+// disconnects mid-stream still cancels the upstream fetch (Bun would otherwise
+// keep pulling the body into a gone socket).
+function requestSignal(clientSignal) {
+  const ctrl = new AbortController();
+  if (clientSignal) {
+    if (clientSignal.aborted) ctrl.abort(clientSignal.reason);
+    else clientSignal.addEventListener("abort", () => ctrl.abort(clientSignal.reason), { once: true });
+  }
+  const timer = setTimeout(() => ctrl.abort(new Error("upstream connect timeout")), CONNECT_TIMEOUT_MS);
+  return { signal: ctrl.signal, headersReceived: () => clearTimeout(timer) };
+}
 
 function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -41,12 +59,14 @@ const server = Bun.serve({
     if (!url) return json({ error: "url required" }, 400);
 
     try {
-      const init = { method: method || "POST", headers: headers || {} };
+      const timeout = requestSignal(req.signal);
+      const init = { method: method || "POST", headers: headers || {}, signal: timeout.signal };
       if (typeof body === "string" && body) init.body = Buffer.from(body, "base64");
       // The proxy hop stays inside the Bun transport so the TLS handshake to the
       // upstream still originates here (a NAT'd relay would rewrite headers only).
       if (proxy) init.proxy = proxy;
       const upstream = await fetch(url, init);
+      timeout.headersReceived();
 
       const outHeaders = new Headers();
       upstream.headers.forEach((value, key) => {
