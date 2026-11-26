@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Regression: a 429 answered over the wreq/native handshake is the free lane's
-// TLS gate, not a quota refusal for that IP. Cooling the egress on it locked a
-// healthy proxy out for the full 30-minute cooldown, so every later request was
-// answered from the cache ("no alternate — local 429") until the timer expired.
+// Regression: OpenCode free-lane 429s must not poison egress cooldown state.
+// Bun-only transport means upstream 429 is returned/retried by transport logic,
+// but egress cooldown cache must never block subsequent requests locally.
 
 const mocks = vi.hoisted(() => {
   class OpencodeTransportUnavailableError extends Error { }
@@ -83,10 +82,9 @@ afterEach(() => {
   if (id) egress.clearEgressCooldown(id);
 });
 
-describe("opencode free lane: TLS-gate 429 must not cool the egress", () => {
-  it("leaves the egress healthy when the 429 came from the wreq transport", async () => {
-    mocks.transportFetch.mockRejectedValue(new mocks.OpencodeTransportUnavailableError("sidecar down"));
-    mocks.opencodeTlsFetch.mockResolvedValue(rateLimited());
+describe("opencode free lane: 429 must not cool the egress", () => {
+  it("leaves the egress healthy when Bun transport returns 429", async () => {
+    mocks.transportFetch.mockResolvedValue(rateLimited());
 
     const result = await new OpenCodeExecutor().execute(executorArgs());
 
@@ -96,28 +94,28 @@ describe("opencode free lane: TLS-gate 429 must not cool the egress", () => {
   });
 
   it("a following request still reaches upstream instead of a cached local 429", async () => {
-    mocks.transportFetch.mockRejectedValue(new mocks.OpencodeTransportUnavailableError("sidecar down"));
-    mocks.opencodeTlsFetch.mockResolvedValue(rateLimited());
+    mocks.transportFetch
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(accepted());
 
     const ex = new OpenCodeExecutor();
-    await ex.execute(executorArgs());
+    const first = await ex.execute(executorArgs());
+    expect(first.response.status).toBe(429);
 
-    // Transport recovers: the lane must be usable immediately, not 30 minutes later.
-    mocks.transportFetch.mockReset();
-    mocks.transportFetch.mockResolvedValue(accepted());
     const second = await ex.execute(executorArgs());
 
     expect(second.response.status).toBe(200);
-    expect(mocks.transportFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.transportFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("still cools the egress when the Bun sidecar itself answers 429", async () => {
+  it("does not cool the egress even when Bun sidecar keeps answering 429", async () => {
     mocks.transportFetch.mockResolvedValue(rateLimited());
 
     const result = await new OpenCodeExecutor().execute(executorArgs());
 
     expect(result.response.status).toBe(429);
     const id = egress.identifyFixedEgress(`https://opencode.ai/x`, PROXY)?.id;
-    expect(egress.getEgressCooldown(id)).not.toBeNull();
+    expect(egress.getEgressCooldown(id)).toBeNull();
   });
 });

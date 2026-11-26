@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import { OpenCodeExecutor } from "../../open-sse/executors/opencode.js";
-import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
+import { opencodeTransportFetch } from "../../open-sse/utils/opencodeTransport.js";
 import { OPENCODE_FINGERPRINT_TOOLS } from "../../open-sse/utils/opencodeFingerprint.js";
 
-vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
-  proxyAwareFetch: vi.fn(async () => ({ ok: true, status: 200, headers: { get: () => "" } })),
+vi.mock("../../open-sse/utils/opencodeTransport.js", () => ({
+  isOpencodeTransportEnabled: () => true,
+  opencodeTransportFetch: vi.fn(async () => new Response(null, { status: 200, headers: {} })),
+  OpencodeTransportUnavailableError: class OpencodeTransportUnavailableError extends Error {},
 }));
 
 // Break caught: opencode/muse-spark-1.3-contributor-free 400 because upstream
@@ -75,7 +77,7 @@ describe("opencode Free 1.3 tool_choice auto-only", () => {
   });
 
   it("wire: execute sends the auto choice to /inference/v1/responses", async () => {
-    proxyAwareFetch.mockClear();
+    opencodeTransportFetch.mockClear();
     const ex = new OpenCodeExecutor();
     const body = responsesBody(FREE_13, { type: "function", name: "get_weather" });
     const { url, transformedBody } = await ex.execute({
@@ -83,8 +85,8 @@ describe("opencode Free 1.3 tool_choice auto-only", () => {
     });
     expect(url).toBe("https://opencode.ai/inference/openai/v1/responses");
     expect(transformedBody.tool_choice).toBe("auto");
-    expect(proxyAwareFetch).toHaveBeenCalledTimes(1);
-    const [actualUrl, actualInit] = proxyAwareFetch.mock.calls[0];
+    expect(opencodeTransportFetch).toHaveBeenCalledTimes(1);
+    const [actualUrl, actualInit] = opencodeTransportFetch.mock.calls[0];
     expect(actualUrl).toBe("https://opencode.ai/inference/openai/v1/responses");
     const sent = JSON.parse(actualInit.body);
     expect(sent.tool_choice).toBe("auto");
